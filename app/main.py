@@ -366,6 +366,32 @@ async def startup():
 # ---------------------------------------------------------------------------
 # Agent endpoints — for external API / AI agent queries
 # ---------------------------------------------------------------------------
+@app.get("/health/connect/latest")
+async def get_latest_health_record(
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(verify_api_key),
+):
+    """Retrieve the absolute latest Health Connect record (provisional or canonical)."""
+    try:
+        query = await db.execute(
+            text("SELECT * FROM shealth_daily ORDER BY received_at DESC LIMIT 1")
+        )
+        record = query.mappings().first()
+        
+        if not record:
+            return {"status": "no_data", "message": "Database is empty"}
+            
+        record_dict = dict(record)
+        record_dict["id"] = str(record_dict["id"])
+        return record_dict
+    except Exception as e:
+        logger.error(f"Failed to fetch latest record: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database error: {str(e)}"
+        )
+
+
 @app.get("/health/connect/{record_id}")
 async def get_health_connect_record(
     record_id: uuid.UUID = Path(..., description="UUID of the Health Connect record"),
@@ -396,32 +422,6 @@ async def get_health_connect_record(
         return record_dict
     except Exception as e:
         logger.error(f"Failed to fetch record {record_id}: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Database error: {str(e)}"
-        )
-
-
-@app.get("/health/connect/latest")
-async def get_latest_health_record(
-    db: AsyncSession = Depends(get_db),
-    _: str = Depends(verify_api_key),
-):
-    """Retrieve the absolute latest Health Connect record (provisional or canonical)."""
-    try:
-        query = await db.execute(
-            text("SELECT * FROM shealth_daily ORDER BY received_at DESC LIMIT 1")
-        )
-        record = query.mappings().first()
-        
-        if not record:
-            return {"status": "no_data", "message": "Database is empty"}
-            
-        record_dict = dict(record)
-        record_dict["id"] = str(record_dict["id"])
-        return record_dict
-    except Exception as e:
-        logger.error(f"Failed to fetch latest record: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Database error: {str(e)}"
