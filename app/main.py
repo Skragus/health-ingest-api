@@ -370,9 +370,9 @@ async def get_latest_health_record(
     db: AsyncSession = Depends(get_db),
     _: str = Depends(verify_api_key),
 ):
-    """Retrieve the absolute latest Health Connect record, merging intraday updates if newer."""
+    """Retrieve the absolute latest Health Connect record, prioritizing higher step counts for today."""
     try:
-        # 1. Get the most recent Daily summary record
+        # 1. Get the latest record from the summary table
         daily_query = await db.execute(
             text("SELECT * FROM health_connect_daily ORDER BY date DESC, collected_at DESC LIMIT 1")
         )
@@ -384,27 +384,25 @@ async def get_latest_health_record(
         record_dict = dict(daily_record)
         record_dict["id"] = str(record_dict["id"])
         
-        # 2. Check for even newer Intraday updates for THIS SPECIFIC DATE
-        # This prevents "Daily: 0 steps" at 1 AM from shadowing "Intraday: 50 steps" at 1:15 AM
+        # 2. Get the highest step count from intraday logs for the same date
         intraday_query = await db.execute(
             text("""
-                SELECT steps_total, collected_at 
+                SELECT MAX(steps_total) as max_steps, MAX(collected_at) as max_collected
                 FROM health_connect_intraday_logs 
-                WHERE date = :date 
-                ORDER BY collected_at DESC LIMIT 1
+                WHERE date = :date
             """),
             {"date": record_dict["date"]}
         )
-        intraday_log = intraday_query.mappings().first()
+        log_data = intraday_query.mappings().first()
         
-        if intraday_log:
-            # Merge if intraday steps are higher or timestamp is newer
-            # We prioritize higher step counts for today's provisional data
-            if intraday_log["steps_total"] > record_dict["steps_total"]:
-                record_dict["steps_total"] = intraday_log["steps_total"]
+        if log_data and log_data["max_steps"] is not None:
+            # Use whichever step count is higher
+            if log_data["max_steps"] > record_dict["steps_total"]:
+                record_dict["steps_total"] = log_data["max_steps"]
             
-            if intraday_log["collected_at"] > record_dict["collected_at"]:
-                record_dict["collected_at"] = intraday_log["collected_at"]
+            # Use whichever timestamp is newer
+            if log_data["max_collected"] > record_dict["collected_at"]:
+                record_dict["collected_at"] = log_data["max_collected"]
                 
         return record_dict
     except Exception as e:
