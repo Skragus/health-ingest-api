@@ -370,19 +370,42 @@ async def get_latest_health_record(
     db: AsyncSession = Depends(get_db),
     _: str = Depends(verify_api_key),
 ):
-    """Retrieve the absolute latest Health Connect record (provisional or canonical)."""
+    """Retrieve the absolute latest Health Connect record, merging intraday updates if newer."""
     try:
-        # Use the new summary table for latest state
-        query = await db.execute(
+        # 1. Get the most recent Daily summary record
+        daily_query = await db.execute(
             text("SELECT * FROM health_connect_daily ORDER BY date DESC, collected_at DESC LIMIT 1")
         )
-        record = query.mappings().first()
+        daily_record = daily_query.mappings().first()
         
-        if not record:
+        if not daily_record:
             return {"status": "no_data", "message": "Database is empty"}
-            
-        record_dict = dict(record)
+        
+        record_dict = dict(daily_record)
         record_dict["id"] = str(record_dict["id"])
+        
+        # 2. Check for even newer Intraday updates for THIS SPECIFIC DATE
+        # This prevents "Daily: 0 steps" at 1 AM from shadowing "Intraday: 50 steps" at 1:15 AM
+        intraday_query = await db.execute(
+            text("""
+                SELECT steps_total, collected_at 
+                FROM health_connect_intraday_logs 
+                WHERE date = :date 
+                ORDER BY collected_at DESC LIMIT 1
+            """),
+            {"date": record_dict["date"]}
+        )
+        intraday_log = intraday_query.mappings().first()
+        
+        if intraday_log:
+            # Merge if intraday steps are higher or timestamp is newer
+            # We prioritize higher step counts for today's provisional data
+            if intraday_log["steps_total"] > record_dict["steps_total"]:
+                record_dict["steps_total"] = intraday_log["steps_total"]
+            
+            if intraday_log["collected_at"] > record_dict["collected_at"]:
+                record_dict["collected_at"] = intraday_log["collected_at"]
+                
         return record_dict
     except Exception as e:
         logger.error(f"Failed to fetch latest record: {e}")
