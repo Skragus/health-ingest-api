@@ -2,6 +2,7 @@ import logging
 import asyncio
 import httpx
 import uuid
+from datetime import date as py_date
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status, Path
 from sqlalchemy.dialects.postgresql import insert
@@ -391,10 +392,14 @@ async def get_latest_health_record(
         )
 
 
+from datetime import date as py_date
+
+# ... existing imports ...
+
 @app.get("/health/connect/range")
 async def get_health_connect_range(
-    start: str,
-    end: str,
+    start: py_date,
+    end: py_date,
     db: AsyncSession = Depends(get_db),
     _: str = Depends(verify_api_key),
 ):
