@@ -391,6 +391,73 @@ async def get_latest_health_record(
         )
 
 
+@app.get("/health/connect/range")
+async def get_health_connect_range(
+    start: str,
+    end: str,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(verify_api_key),
+):
+    """Retrieve Health Connect records within a date range (YYYY-MM-DD)."""
+    try:
+        query = await db.execute(
+            text("""
+                SELECT * FROM health_connect_daily 
+                WHERE date >= :start AND date <= :end 
+                ORDER BY date ASC
+            """),
+            {"start": start, "end": end}
+        )
+        records = query.mappings().all()
+        
+        results = []
+        for row in records:
+            d = dict(row)
+            d["id"] = str(d["id"])
+            results.append(d)
+            
+        return results
+    except Exception as e:
+        logger.error(f"Failed to fetch range {start} to {end}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database error: {str(e)}"
+        )
+
+
+@app.get("/health/connect/by-date/{date}")
+async def get_health_connect_by_date(
+    date: str = Path(..., description="Date in YYYY-MM-DD format"),
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(verify_api_key),
+):
+    """Retrieve the Health Connect record for a specific date."""
+    try:
+        query = await db.execute(
+            text("SELECT * FROM health_connect_daily WHERE date = :date ORDER BY collected_at DESC LIMIT 1"),
+            {"date": date}
+        )
+        record = query.mappings().first()
+        
+        if not record:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"No record found for date {date}"
+            )
+            
+        record_dict = dict(record)
+        record_dict["id"] = str(record_dict["id"])
+        return record_dict
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to fetch date {date}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database error: {str(e)}"
+        )
+
+
 @app.get("/health/connect/{record_id}")
 async def get_health_connect_record(
     record_id: uuid.UUID = Path(..., description="UUID of the Health Connect record"),
