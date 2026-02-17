@@ -241,12 +241,12 @@ async def _upsert_shealth(
     # This captures everything Android sends, including new fields
     raw_payload = payload.model_dump(mode="json")
     
-    # Core fields for querying (extracted for SQL access)
+    # Agnostic envelope — everything lives in raw_data
+    # No special fields extracted, completely neutral storage
     core_data = {
         "device_id": payload.source.device_id,
         "date": payload.date,
         "schema_version": payload.schema_version,
-        "steps_total": payload.steps_total,
         "source_type": source_type,
         "collected_at": payload.source.collected_at,
         "received_at": func.now(),
@@ -276,7 +276,6 @@ async def _upsert_shealth(
     stmt_daily = stmt_daily.on_conflict_do_update(
         constraint="uq_health_connect_daily_device_date_version",
         set_={
-            "steps_total": case((stmt_daily.excluded.collected_at > HealthConnectDaily.collected_at, stmt_daily.excluded.steps_total), else_=HealthConnectDaily.steps_total),
             "raw_data": case((stmt_daily.excluded.collected_at > HealthConnectDaily.collected_at, stmt_daily.excluded.raw_data), else_=HealthConnectDaily.raw_data),
             "source": case((stmt_daily.excluded.collected_at > HealthConnectDaily.collected_at, stmt_daily.excluded.source), else_=HealthConnectDaily.source),
             "source_type": case((stmt_daily.excluded.collected_at > HealthConnectDaily.collected_at, stmt_daily.excluded.source_type), else_=HealthConnectDaily.source_type),
@@ -377,34 +376,34 @@ async def get_latest_health_record(
         record_dict = dict(daily_record)
         record_dict["id"] = str(record_dict["id"])
         
-        # Expand raw_data into the response for backwards compatibility
-        # This merges the full payload (body_metrics, nutrition, etc.) into the response
+        # Expand raw_data into the response
         raw_data = record_dict.pop("raw_data", {})
         if raw_data:
-            # Merge raw_data fields, but don't overwrite core fields
+            # Merge raw_data fields into response
             for key, value in raw_data.items():
                 if key not in record_dict or record_dict[key] is None:
                     record_dict[key] = value
         
-        # 2. Get the highest step count from intraday logs for the same date
+        # 2. Get the latest intraday log for the same date to check for newer data
         intraday_query = await db.execute(
             text("""
-                SELECT MAX(steps_total) as max_steps, MAX(collected_at) as max_collected
+                SELECT raw_data, collected_at
                 FROM health_connect_intraday_logs 
                 WHERE date = :date
+                ORDER BY collected_at DESC
+                LIMIT 1
             """),
             {"date": record_dict["date"]}
         )
         log_data = intraday_query.mappings().first()
         
-        if log_data and log_data["max_steps"] is not None:
-            # Use whichever step count is higher
-            if log_data["max_steps"] > record_dict["steps_total"]:
-                record_dict["steps_total"] = log_data["max_steps"]
-            
-            # Use whichever timestamp is newer
-            if log_data["max_collected"] > record_dict["collected_at"]:
-                record_dict["collected_at"] = log_data["max_collected"]
+        if log_data and log_data["collected_at"] > record_dict["collected_at"]:
+            # Use the newer intraday raw_data
+            log_raw = log_data["raw_data"] or {}
+            for key, value in log_raw.items():
+                if key not in record_dict or record_dict[key] is None:
+                    record_dict[key] = value
+            record_dict["collected_at"] = log_data["collected_at"]
                 
         return record_dict
     except Exception as e:

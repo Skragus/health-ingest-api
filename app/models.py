@@ -23,13 +23,12 @@ class HealthConnectDaily(Base):
     collected_at = Column(DateTime(timezone=True), nullable=False)
     received_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     
-    # Core queryable fields (extracted for SQL querying)
-    steps_total = Column(Integer, nullable=False)
-    source_type = Column(String, nullable=False, server_default="daily")
-    schema_version = Column(Integer, nullable=False, default=1)
-    
     # Raw payload — everything from the Android app lives here
     raw_data = Column(JSONB, nullable=False)
+    
+    # Metadata
+    source_type = Column(String, nullable=False, server_default="daily")
+    schema_version = Column(Integer, nullable=False, default=1)
     
     # Metadata about the source
     source = Column(JSONB, nullable=False)
@@ -63,13 +62,12 @@ class HealthConnectIntradayLog(Base):
     collected_at = Column(DateTime(timezone=True), nullable=False, index=True)
     received_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     
-    # Core queryable fields
-    steps_total = Column(Integer, nullable=False)
-    source_type = Column(String, nullable=False)
-    schema_version = Column(Integer, nullable=False, default=1)
-    
     # Raw payload — everything from the Android app lives here
     raw_data = Column(JSONB, nullable=False)
+    
+    # Metadata
+    source_type = Column(String, nullable=False)
+    schema_version = Column(Integer, nullable=False, default=1)
     
     # Metadata about the source
     source = Column(JSONB, nullable=False)
