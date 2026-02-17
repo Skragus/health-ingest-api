@@ -10,6 +10,7 @@ class HealthConnectDaily(Base):
     """
     Summary table: One row per day, always the current best state.
     Updated by both intraday and daily syncs throughout the day.
+    Stores raw JSON payload for flexibility — all metrics live in raw_data.
     """
     __tablename__ = "health_connect_daily"
 
@@ -22,17 +23,15 @@ class HealthConnectDaily(Base):
     collected_at = Column(DateTime(timezone=True), nullable=False)
     received_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     
-    # Metrics (The "What")
+    # Core queryable fields (extracted for SQL querying)
     steps_total = Column(Integer, nullable=False)
-    body_metrics = Column(JSONB, nullable=True)
-    nutrition_summary = Column(JSONB, nullable=True)
-    heart_rate_summary = Column(JSONB, nullable=True)
-    sleep_sessions = Column(JSONB, nullable=True)
-    exercise_sessions = Column(JSONB, nullable=True)
-    
-    # Metadata
     source_type = Column(String, nullable=False, server_default="daily")
     schema_version = Column(Integer, nullable=False, default=1)
+    
+    # Raw payload — everything from the Android app lives here
+    raw_data = Column(JSONB, nullable=False)
+    
+    # Metadata about the source
     source = Column(JSONB, nullable=False)
 
     __table_args__ = (
@@ -51,7 +50,7 @@ class HealthConnectIntradayLog(Base):
     """
     History table: Every sync gets a row, append-only.
     Captures granular time-series data for trend analysis.
-    Can be partitioned by month or purged after retention period.
+    Stores raw JSON payload for flexibility.
     """
     __tablename__ = "health_connect_intraday_logs"
 
@@ -64,17 +63,15 @@ class HealthConnectIntradayLog(Base):
     collected_at = Column(DateTime(timezone=True), nullable=False, index=True)
     received_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     
-    # Metrics (The "What")
+    # Core queryable fields
     steps_total = Column(Integer, nullable=False)
-    body_metrics = Column(JSONB, nullable=True)
-    nutrition_summary = Column(JSONB, nullable=True)
-    heart_rate_summary = Column(JSONB, nullable=True)
-    sleep_sessions = Column(JSONB, nullable=True)
-    exercise_sessions = Column(JSONB, nullable=True)
-    
-    # Metadata
     source_type = Column(String, nullable=False)
     schema_version = Column(Integer, nullable=False, default=1)
+    
+    # Raw payload — everything from the Android app lives here
+    raw_data = Column(JSONB, nullable=False)
+    
+    # Metadata about the source
     source = Column(JSONB, nullable=False)
 
     __table_args__ = (

@@ -232,30 +232,26 @@ async def _upsert_shealth(
     db: AsyncSession,
 ):
     """Build and execute an idempotent upsert for shealth_daily (Legacy) 
-    AND the new HealthConnectDaily / HealthConnectIntradayLog structure."""
+    AND the new HealthConnectDaily / HealthConnectIntradayLog structure.
     
-    # Validate and sanitize data
-    validated_body_metrics = _validate_body_metrics(payload.body_metrics)
-    validated_heart_rate = _validate_heart_rate_summary(payload.heart_rate_summary)
-    validated_nutrition = _validate_nutrition_summary(payload.nutrition_summary)
+    New approach: Store raw JSON payload for flexibility while keeping
+    core fields queryable in the database."""
     
-    ingest_data = {
+    # Build the raw payload from the entire request
+    # This captures everything Android sends, including new fields
+    raw_payload = payload.model_dump(mode="json")
+    
+    # Core fields for querying (extracted for SQL access)
+    core_data = {
         "device_id": payload.source.device_id,
         "date": payload.date,
         "schema_version": payload.schema_version,
         "steps_total": payload.steps_total,
-        "sleep_sessions": payload.sleep_sessions,
-        "heart_rate_summary": validated_heart_rate,
-        "body_metrics": validated_body_metrics,
-        "nutrition_summary": validated_nutrition,
-        "exercise_sessions": [
-            s.model_dump(mode="json") for s in payload.exercise_sessions
-        ]
-        if payload.exercise_sessions
-        else None,
-        "source": payload.source.model_dump(mode="json"),
         "source_type": source_type,
         "collected_at": payload.source.collected_at,
+        "received_at": func.now(),
+        "raw_data": raw_payload,  # Everything lives here
+        "source": payload.source.model_dump(mode="json"),
     }
 
     # 1. LEGACY: Upsert to shealth_daily
@@ -275,25 +271,22 @@ async def _upsert_shealth(
         },
     )
 
-    # 2. NEW: Upsert to health_connect_daily
-    stmt_daily = insert(HealthConnectDaily).values(**ingest_data)
+    # 2. NEW: Upsert to health_connect_daily (raw_data approach)
+    stmt_daily = insert(HealthConnectDaily).values(**core_data)
     stmt_daily = stmt_daily.on_conflict_do_update(
         constraint="uq_health_connect_daily_device_date_version",
         set_={
             "steps_total": case((stmt_daily.excluded.collected_at > HealthConnectDaily.collected_at, stmt_daily.excluded.steps_total), else_=HealthConnectDaily.steps_total),
-            "sleep_sessions": case((stmt_daily.excluded.collected_at > HealthConnectDaily.collected_at, stmt_daily.excluded.sleep_sessions), else_=HealthConnectDaily.sleep_sessions),
-            "heart_rate_summary": case((stmt_daily.excluded.collected_at > HealthConnectDaily.collected_at, stmt_daily.excluded.heart_rate_summary), else_=HealthConnectDaily.heart_rate_summary),
-            "body_metrics": case((stmt_daily.excluded.collected_at > HealthConnectDaily.collected_at, stmt_daily.excluded.body_metrics), else_=HealthConnectDaily.body_metrics),
-            "nutrition_summary": case((stmt_daily.excluded.collected_at > HealthConnectDaily.collected_at, stmt_daily.excluded.nutrition_summary), else_=HealthConnectDaily.nutrition_summary),
-            "exercise_sessions": case((stmt_daily.excluded.collected_at > HealthConnectDaily.collected_at, stmt_daily.excluded.exercise_sessions), else_=HealthConnectDaily.exercise_sessions),
+            "raw_data": case((stmt_daily.excluded.collected_at > HealthConnectDaily.collected_at, stmt_daily.excluded.raw_data), else_=HealthConnectDaily.raw_data),
             "source": case((stmt_daily.excluded.collected_at > HealthConnectDaily.collected_at, stmt_daily.excluded.source), else_=HealthConnectDaily.source),
             "source_type": case((stmt_daily.excluded.collected_at > HealthConnectDaily.collected_at, stmt_daily.excluded.source_type), else_=HealthConnectDaily.source_type),
             "collected_at": case((stmt_daily.excluded.collected_at > HealthConnectDaily.collected_at, stmt_daily.excluded.collected_at), else_=HealthConnectDaily.collected_at),
+            "received_at": func.now(),  # Always update received_at on upsert
         },
     )
 
     # 3. NEW: Append to health_connect_intraday_logs (NO UPSERT, just INSERT)
-    stmt_log = insert(HealthConnectIntradayLog).values(**ingest_data)
+    stmt_log = insert(HealthConnectIntradayLog).values(**core_data)
 
     try:
         await db.execute(stmt_legacy)
@@ -384,6 +377,15 @@ async def get_latest_health_record(
         record_dict = dict(daily_record)
         record_dict["id"] = str(record_dict["id"])
         
+        # Expand raw_data into the response for backwards compatibility
+        # This merges the full payload (body_metrics, nutrition, etc.) into the response
+        raw_data = record_dict.pop("raw_data", {})
+        if raw_data:
+            # Merge raw_data fields, but don't overwrite core fields
+            for key, value in raw_data.items():
+                if key not in record_dict or record_dict[key] is None:
+                    record_dict[key] = value
+        
         # 2. Get the highest step count from intraday logs for the same date
         intraday_query = await db.execute(
             text("""
@@ -440,6 +442,12 @@ async def get_health_connect_range(
         for row in records:
             d = dict(row)
             d["id"] = str(d["id"])
+            # Expand raw_data into the response
+            raw_data = d.pop("raw_data", {})
+            if raw_data:
+                for key, value in raw_data.items():
+                    if key not in d or d[key] is None:
+                        d[key] = value
             results.append(d)
             
         return results
@@ -473,6 +481,12 @@ async def get_health_connect_by_date(
             
         record_dict = dict(record)
         record_dict["id"] = str(record_dict["id"])
+        # Expand raw_data into the response
+        raw_data = record_dict.pop("raw_data", {})
+        if raw_data:
+            for key, value in raw_data.items():
+                if key not in record_dict or record_dict[key] is None:
+                    record_dict[key] = value
         return record_dict
     except HTTPException:
         raise
@@ -515,6 +529,13 @@ async def get_health_connect_record(
         # Convert UUID to string for JSON serialization
         record_dict = dict(record)
         record_dict["id"] = str(record_dict["id"])
+        
+        # Expand raw_data into the response
+        raw_data = record_dict.pop("raw_data", {})
+        if raw_data:
+            for key, value in raw_data.items():
+                if key not in record_dict or record_dict[key] is None:
+                    record_dict[key] = value
         
         return record_dict
     except Exception as e:
