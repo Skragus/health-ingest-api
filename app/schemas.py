@@ -92,3 +92,4 @@ class DailyIngestRequest(BaseModel):
 class IngestResponse(BaseModel):
     status: str = "ok"
     upserted: bool = True
+    intraday_inserted: bool = False  # True only if a new intraday row was created

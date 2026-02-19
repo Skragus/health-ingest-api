@@ -300,26 +300,31 @@ async def _upsert_shealth(
     )
 
     # 3. NEW: Append to health_connect_intraday_logs (insert or ignore on duplicate)
-    stmt_log = insert(HealthConnectIntradayLog).values(**core_data)
-    stmt_log = stmt_log.on_conflict_do_nothing(
-        constraint="uq_intraday_device_date_collected"
-    )
+    intraday_inserted = False
+    if source_type == "intraday":
+        stmt_log = insert(HealthConnectIntradayLog).values(**core_data)
+        stmt_log = stmt_log.on_conflict_do_nothing(
+            constraint="uq_intraday_device_date_collected"
+        ).returning(HealthConnectIntradayLog.id)
 
     try:
         await db.execute(stmt_legacy)
         await db.execute(stmt_daily)
         # Only append to intraday_logs for actual intraday syncs, not daily reconciliations
         if source_type == "intraday":
-            await db.execute(stmt_log)
+            result = await db.execute(stmt_log)
+            # If we got a row back, insert succeeded; if None, it was a duplicate
+            intraday_inserted = result.scalar() is not None
         await db.commit()
         logger.info(
-            "Ingest OK [%s]: device=%s date=%s steps=%d",
+            "Ingest OK [%s]: device=%s date=%s steps=%d inserted=%s",
             source_type,
             payload.source.device_id,
             payload.date,
             payload.steps_total,
+            intraday_inserted if source_type == "intraday" else "N/A",
         )
-        return IngestResponse()
+        return IngestResponse(intraday_inserted=intraday_inserted)
     except Exception as e:
         logger.error("Ingest failed [%s]: %s", source_type, e)
         await db.rollback()
@@ -359,8 +364,11 @@ async def ingest_intraday(
     logger.info("Received INTRADAY sync request for date=%s from device=%s", payload.date, payload.source.device_id)
     result = await _upsert_shealth(payload, source_type="intraday", db=db)
     
-    # Send Telegram notification asynchronously (don't block response)
-    asyncio.create_task(send_telegram_notification("intraday", payload))
+    # Only send Telegram notification if we actually inserted a new row (not a duplicate)
+    if result.intraday_inserted:
+        asyncio.create_task(send_telegram_notification("intraday", payload))
+    else:
+        logger.info("Skipping Telegram notification for duplicate intraday sync")
     
     return result
 
