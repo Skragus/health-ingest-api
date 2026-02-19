@@ -299,8 +299,11 @@ async def _upsert_shealth(
         },
     )
 
-    # 3. NEW: Append to health_connect_intraday_logs (NO UPSERT, just INSERT)
+    # 3. NEW: Append to health_connect_intraday_logs (insert or ignore on duplicate)
     stmt_log = insert(HealthConnectIntradayLog).values(**core_data)
+    stmt_log = stmt_log.on_conflict_do_nothing(
+        constraint="uq_intraday_device_date_collected"
+    )
 
     try:
         await db.execute(stmt_legacy)
