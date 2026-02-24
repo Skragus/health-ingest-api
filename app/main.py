@@ -6,7 +6,6 @@ import httpx
 from datetime import date as py_date
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status, Path, Query
-from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 
@@ -140,31 +139,60 @@ async def ingest_daily(
     
     payload = _validate_payload(payload)
     raw_payload = payload.model_dump(mode="json")
+    device_id = payload.source.device_id
+    date = payload.date
+    collected_at = payload.source.collected_at
     
-    # Upsert: insert or update if collected_at is newer
-    stmt = (
-        insert(HealthConnectDaily)
-        .values(
-            device_id=payload.source.device_id,
-            date=payload.date,
-            collected_at=payload.source.collected_at,
-            raw_data=raw_payload,
-        )
-        .on_conflict_do_update(
-            index_elements=["device_id", "date"],
-            set_=dict(
-                collected_at=payload.source.collected_at,
-                raw_data=raw_payload,
-            ),
-            where=(
-                payload.source.collected_at > HealthConnectDaily.collected_at
-            ),
-        )
+    # Manual upsert: check existing, insert or update
+    existing = await db.execute(
+        text("""
+            SELECT collected_at FROM health_connect_daily
+            WHERE device_id = :device_id AND date = :date
+        """),
+        {"device_id": device_id, "date": date}
     )
+    row = existing.fetchone()
     
-    await db.execute(stmt)
+    if row:
+        # Row exists — check if new data is newer
+        existing_collected_at = row[0]
+        if collected_at > existing_collected_at:
+            # Update with newer data
+            await db.execute(
+                text("""
+                    UPDATE health_connect_daily
+                    SET collected_at = :collected_at,
+                        raw_data = :raw_data,
+                        received_at = NOW()
+                    WHERE device_id = :device_id AND date = :date
+                """),
+                {
+                    "device_id": device_id,
+                    "date": date,
+                    "collected_at": collected_at,
+                    "raw_data": raw_payload,
+                }
+            )
+            logger.info(f"Updated daily record for {date} (newer collected_at)")
+        else:
+            logger.info(f"Skipped daily update for {date} (existing is newer or same)")
+    else:
+        # Insert new row
+        await db.execute(
+            text("""
+                INSERT INTO health_connect_daily (device_id, date, collected_at, raw_data)
+                VALUES (:device_id, :date, :collected_at, :raw_data)
+            """),
+            {
+                "device_id": device_id,
+                "date": date,
+                "collected_at": collected_at,
+                "raw_data": raw_payload,
+            }
+        )
+        logger.info(f"Inserted new daily record for {date}")
+    
     await db.commit()
-    
     asyncio.create_task(_send_notification("daily", payload))
     
     return IngestResponse(inserted=True)
@@ -186,18 +214,24 @@ async def ingest_intraday(
     payload = _validate_payload(payload)
     raw_payload = payload.model_dump(mode="json")
     
-    # Pure append — no conflict resolution
-    stmt = insert(HealthConnectIntradayLog).values(
-        device_id=payload.source.device_id,
-        date=payload.date,
-        collected_at=payload.source.collected_at,
-        raw_data=raw_payload,
+    # Pure append — no conflict resolution, no constraints needed
+    result = await db.execute(
+        text("""
+            INSERT INTO health_connect_intraday_logs 
+                (id, device_id, date, collected_at, raw_data)
+            VALUES 
+                (gen_random_uuid(), :device_id, :date, :collected_at, :raw_data)
+            RETURNING id
+        """),
+        {
+            "device_id": payload.source.device_id,
+            "date": payload.date,
+            "collected_at": payload.source.collected_at,
+            "raw_data": raw_payload,
+        }
     )
-    
-    result = await db.execute(stmt)
     await db.commit()
     
-    # Extract generated UUID
     inserted_id = result.scalar()
     
     asyncio.create_task(_send_notification("intraday", payload))
