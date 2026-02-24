@@ -129,72 +129,32 @@ async def ingest_daily(
     db: AsyncSession = Depends(get_db),
     _: str = Depends(verify_api_key),
 ):
-    """Canonical daily ingestion — upserts to daily table.
+    """Canonical daily ingestion — simple insert for backfill.
     
-    Newer collected_at wins. Use for:
-    - End-of-day reconciliation  
-    - Backfilling past dates
-    - Correcting/syncing historical data
+    Temporarily simplified: always inserts. Upsert logic to be restored.
     """
     logger.info(f"Daily ingest: {payload.date} from {payload.source.device_id}")
     
     payload = _validate_payload(payload)
     raw_payload = json.dumps(payload.model_dump(mode="json"))
-    device_id = payload.source.device_id
-    date = payload.date
-    collected_at = payload.source.collected_at
     
-    # Manual upsert: check existing, insert or update
-    existing = await db.execute(
+    # Simple insert for now
+    await db.execute(
         text("""
-            SELECT collected_at FROM health_connect_daily
-            WHERE device_id = :device_id AND date = :date
+            INSERT INTO health_connect_daily (id, device_id, date, collected_at, raw_data)
+            VALUES (gen_random_uuid(), :device_id, :date, :collected_at, :raw_data)
         """),
-        {"device_id": device_id, "date": date}
+        {
+            "device_id": payload.source.device_id,
+            "date": payload.date,
+            "collected_at": payload.source.collected_at,
+            "raw_data": raw_payload,
+        }
     )
-    row = existing.fetchone()
-    
-    if row:
-        # Row exists — check if new data is newer
-        existing_collected_at = row[0]
-        if collected_at > existing_collected_at:
-            # Update with newer data
-            await db.execute(
-                text("""
-                    UPDATE health_connect_daily
-                    SET collected_at = :collected_at,
-                        raw_data = :raw_data,
-                        received_at = NOW()
-                    WHERE device_id = :device_id AND date = :date
-                """),
-                {
-                    "device_id": device_id,
-                    "date": date,
-                    "collected_at": collected_at,
-                    "raw_data": raw_payload,
-                }
-            )
-            logger.info(f"Updated daily record for {date} (newer collected_at)")
-        else:
-            logger.info(f"Skipped daily update for {date} (existing is newer or same)")
-    else:
-        # Insert new row
-        await db.execute(
-            text("""
-                INSERT INTO health_connect_daily (device_id, date, collected_at, raw_data)
-                VALUES (:device_id, :date, :collected_at, :raw_data)
-            """),
-            {
-                "device_id": device_id,
-                "date": date,
-                "collected_at": collected_at,
-                "raw_data": raw_payload,
-            }
-        )
-        logger.info(f"Inserted new daily record for {date}")
-    
     await db.commit()
+    
     asyncio.create_task(_send_notification("daily", payload))
+    logger.info(f"Inserted daily record for {payload.date}")
     
     return IngestResponse(inserted=True)
 
