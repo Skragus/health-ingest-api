@@ -1,5 +1,6 @@
 """SH-APK-API — Health Connect Ingestion Layer (Simplified v2)"""
 
+import json
 import logging
 import asyncio
 import httpx
@@ -138,7 +139,7 @@ async def ingest_daily(
     logger.info(f"Daily ingest: {payload.date} from {payload.source.device_id}")
     
     payload = _validate_payload(payload)
-    raw_payload = payload.model_dump(mode="json")
+    raw_payload = json.dumps(payload.model_dump(mode="json"))
     device_id = payload.source.device_id
     date = payload.date
     collected_at = payload.source.collected_at
@@ -212,7 +213,7 @@ async def ingest_intraday(
     logger.info(f"Intraday ingest: {payload.date} from {payload.source.device_id}")
     
     payload = _validate_payload(payload)
-    raw_payload = payload.model_dump(mode="json")
+    raw_payload = json.dumps(payload.model_dump(mode="json"))
     
     # Pure append — no conflict resolution, no constraints needed
     result = await db.execute(
