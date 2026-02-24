@@ -181,8 +181,8 @@ async def ingest_daily(
         # Insert new row
         await db.execute(
             text("""
-                INSERT INTO health_connect_daily (device_id, date, collected_at, raw_data)
-                VALUES (:device_id, :date, :collected_at, :raw_data)
+                INSERT INTO health_connect_daily (device_id, date, collected_at, raw_data, source_type, schema_version, source)
+                VALUES (:device_id, :date, :collected_at, :raw_data, 'daily', 1, '{}')
             """),
             {
                 "device_id": device_id,
@@ -215,13 +215,13 @@ async def ingest_intraday(
     payload = _validate_payload(payload)
     raw_payload = json.dumps(payload.model_dump(mode="json"))
     
-    # Pure append — no conflict resolution, no constraints needed
+    # Pure append — provide defaults for old schema columns
     result = await db.execute(
         text("""
             INSERT INTO health_connect_intraday_logs 
-                (id, device_id, date, collected_at, raw_data)
+                (id, device_id, date, collected_at, raw_data, source_type, schema_version, source)
             VALUES 
-                (gen_random_uuid(), :device_id, :date, :collected_at, :raw_data)
+                (gen_random_uuid(), :device_id, :date, :collected_at, :raw_data, 'intraday', 1, '{}')
             RETURNING id
         """),
         {
