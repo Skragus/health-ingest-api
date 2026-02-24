@@ -16,6 +16,7 @@ class HealthConnectDaily(Base):
     """
     __tablename__ = "health_connect_daily"
 
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     device_id = Column(String, nullable=False)
     date = Column(Date, nullable=False)
     collected_at = Column(DateTime(timezone=True), nullable=False)
