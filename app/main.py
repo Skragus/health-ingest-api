@@ -4,9 +4,9 @@ import json
 import logging
 import asyncio
 import httpx
-from datetime import date as py_date
+from datetime import date as py_date, datetime
 
-from fastapi import Depends, FastAPI, Header, HTTPException, status, Path, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, status, Path, Query, Body
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 
@@ -120,8 +120,36 @@ async def _send_notification(sync_type: str, payload: DailyIngestRequest):
 
 
 # ---------------------------------------------------------------------------
-# Ingest Endpoints
+# Debug / Schema Discovery
 # ---------------------------------------------------------------------------
+
+@app.post("/v1/ingest/debug")
+async def ingest_debug(
+    payload: dict = Body(...),
+    _: str = Depends(verify_api_key),
+):
+    """Raw schema capture for Health Connect development.
+    
+    Logs full JSON payload and returns it for inspection.
+    Use this to discover actual field structure from watchdogbridge.
+    """
+    raw_json = json.dumps(payload, indent=2, default=str)
+    logger.info(f"RAW HEALTH CONNECT PAYLOAD:\n{raw_json}")
+    
+    # Also save to a file for easy retrieval
+    debug_file = f"/tmp/health_connect_debug_{payload.get('date', 'unknown')}_{datetime.now().isoformat()}.json"
+    try:
+        with open(debug_file, 'w') as f:
+            f.write(raw_json)
+    except Exception as e:
+        logger.warning(f"Could not write debug file: {e}")
+    
+    return {
+        "status": "debug_logged",
+        "payload": payload,
+        "size_bytes": len(raw_json),
+        "top_level_keys": list(payload.keys()),
+    }
 
 @app.post("/v1/ingest/daily", response_model=IngestResponse)
 async def ingest_daily(
