@@ -85,3 +85,33 @@ class IngestResponse(BaseModel):
     status: str = "ok"
     inserted: bool = True
     id: Optional[UUID] = None  # Only set for intraday (append gives UUID)
+
+
+# ============================================================================
+# V3 Raw Health Connect Schema
+# ============================================================================
+
+class SourceHealthConnect(BaseModel):
+    source_app: str = "health_connect"
+    device_id: str
+    collected_at: datetime
+
+
+class RawHealthConnectIngest(BaseModel):
+    """
+    V3 Schema - Raw Health Connect export.
+    Stores complete Health Connect records array as raw JSON blob.
+    """
+    schema_version: int = Field(default=3)
+    date: date
+    raw_json: str  # JSON string containing full Health Connect export
+    source: SourceHealthConnect
+    
+    model_config = {"extra": "allow"}
+
+    @field_validator("date")
+    @classmethod
+    def validate_date_not_future(cls, v: date) -> date:
+        if v > datetime.now(timezone.utc).date():
+            raise ValueError("Date cannot be in the future")
+        return v

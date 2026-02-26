@@ -10,9 +10,8 @@ from app.database import Base
 
 class HealthConnectDaily(Base):
     """
-    Canonical daily summary — one row per (device_id, date).
-    Upserted by daily endpoint. Newer collected_at wins.
-    No unique constraints — handled in application code.
+    Raw Health Connect daily snapshot (v3 schema).
+    One row per (device_id, date, collected_at) — newest wins.
     """
     __tablename__ = "health_connect_daily"
 
@@ -21,14 +20,15 @@ class HealthConnectDaily(Base):
     date = Column(Date, nullable=False)
     collected_at = Column(DateTime(timezone=True), nullable=False)
     received_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    raw_data = Column(JSONB, nullable=False)
+    schema_version = Column(String, nullable=False, default="3")
+    source_app = Column(String, nullable=False, default="health_connect")
+    raw_json = Column(JSONB, nullable=False)
 
 
 class HealthConnectIntradayLog(Base):
     """
-    Append-only intraday sync log.
+    Raw Health Connect intraday sync log (v3 schema).
     Every sync gets a row. Query with ORDER BY collected_at DESC for latest.
-    No unique constraints — pure append.
     """
     __tablename__ = "health_connect_intraday_logs"
 
@@ -37,4 +37,6 @@ class HealthConnectIntradayLog(Base):
     date = Column(Date, nullable=False)
     collected_at = Column(DateTime(timezone=True), nullable=False)
     received_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    raw_data = Column(JSONB, nullable=False)
+    schema_version = Column(String, nullable=False, default="3")
+    source_app = Column(String, nullable=False, default="health_connect")
+    raw_json = Column(JSONB, nullable=False)

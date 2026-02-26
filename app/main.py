@@ -13,7 +13,7 @@ from sqlalchemy import text
 from app.config import settings
 from app.database import Base, engine, get_db
 from app.models import HealthConnectDaily, HealthConnectIntradayLog
-from app.schemas import DailyIngestRequest, IngestResponse
+from app.schemas import RawHealthConnectIngest, IngestResponse
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("health-ingest")
@@ -38,41 +38,23 @@ async def verify_api_key(x_api_key: str = Header(...)):
 # Validation
 # ---------------------------------------------------------------------------
 
-def _validate_payload(payload: DailyIngestRequest) -> DailyIngestRequest:
-    """Validate payload fields and null out garbage data."""
+def _validate_raw_payload(payload: RawHealthConnectIngest) -> RawHealthConnectIngest:
+    """Minimal validation for raw Health Connect payloads."""
+    # Parse raw_json to check it's valid JSON
+    try:
+        json.loads(payload.raw_json)
+    except json.JSONDecodeError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid JSON in raw_json: {str(e)}"
+        )
     
-    # Body metrics validation
-    if payload.body_metrics:
-        weight = payload.body_metrics.weight_kg
-        if weight is not None and (weight < 30 or weight > 300):
-            logger.warning(f"Rejecting invalid weight: {weight} kg")
-            payload.body_metrics.weight_kg = None
-        
-        body_fat = payload.body_metrics.body_fat_percentage
-        if body_fat is not None and (body_fat < 3 or body_fat > 70):
-            logger.warning(f"Rejecting invalid body fat: {body_fat}%")
-            payload.body_metrics.body_fat_percentage = None
-    
-    # Heart rate validation
-    if payload.heart_rate_summary:
-        for field in ["min_bpm", "max_bpm", "avg_bpm", "resting_bpm"]:
-            value = getattr(payload.heart_rate_summary, field, None)
-            if value is not None and (value < 30 or value > 250):
-                logger.warning(f"Rejecting invalid heart rate ({field}): {value} bpm")
-                setattr(payload.heart_rate_summary, field, None)
-    
-    # Nutrition validation
-    if payload.nutrition_summary:
-        calories = payload.nutrition_summary.calories_total
-        if calories is not None and (calories < 0 or calories > 10000):
-            logger.warning(f"Rejecting invalid calories: {calories}")
-            payload.nutrition_summary.calories_total = None
-        
-        for macro in ["protein_grams", "carbs_grams", "fat_grams"]:
-            value = getattr(payload.nutrition_summary, macro, None)
-            if value is not None and value < 0:
-                logger.warning(f"Rejecting invalid macro ({macro}): {value}g")
-                setattr(payload.nutrition_summary, macro, None)
+    # Check payload size (prevent abuse)
+    if len(payload.raw_json) > 50_000_000:  # 50MB limit
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="Payload exceeds 50MB limit"
+        )
     
     return payload
 
@@ -81,30 +63,33 @@ def _validate_payload(payload: DailyIngestRequest) -> DailyIngestRequest:
 # Notifications
 # ---------------------------------------------------------------------------
 
-async def _send_notification(sync_type: str, payload: DailyIngestRequest):
-    """Send formatted sync notification to Telegram."""
+async def _send_notification(sync_type: str, payload: RawHealthConnectIngest):
+    """Send formatted sync notification to Telegram (v3 raw format)."""
     try:
-        lines = [f"✅ {sync_type.title()} Sync", f"📅 {payload.date}"]
+        # Parse raw JSON to extract basic stats
+        raw_data = json.loads(payload.raw_json)
         
-        if payload.steps_total is not None:
-            lines.append(f"🚶 {payload.steps_total:,} steps")
+        lines = [f"✅ {sync_type.title()} Sync (v3)", f"📅 {payload.date}"]
         
-        if payload.body_metrics and payload.body_metrics.weight_kg:
-            weight_line = f"⚖️ {payload.body_metrics.weight_kg:.1f} kg"
-            if payload.body_metrics.body_fat_percentage:
-                weight_line += f" ({payload.body_metrics.body_fat_percentage:.1f}% BF)"
-            lines.append(weight_line)
+        # Extract step count from StepsRecord if available
+        steps_records = raw_data.get("StepsRecord", [])
+        if steps_records:
+            total_steps = sum(s.get("count", 0) for s in steps_records)
+            lines.append(f"🚶 {total_steps:,} steps")
         
-        if payload.exercise_sessions:
-            lines.append(f"💪 {len(payload.exercise_sessions)} workout(s)")
-            for ex in payload.exercise_sessions:
-                lines.append(f"   • {ex.title or 'Workout'} ({ex.duration_minutes} min)")
+        # Count exercise sessions
+        exercise_records = raw_data.get("ExerciseSessionRecord", [])
+        if exercise_records:
+            lines.append(f"💪 {len(exercise_records)} workout(s)")
         
-        if payload.nutrition_summary and payload.nutrition_summary.calories_total:
-            food_line = f"🍽️ {payload.nutrition_summary.calories_total} cal"
-            if payload.nutrition_summary.protein_grams:
-                food_line += f" ({payload.nutrition_summary.protein_grams:.1f}g protein)"
-            lines.append(food_line)
+        # Sum nutrition calories
+        nutrition_records = raw_data.get("NutritionRecord", [])
+        if nutrition_records:
+            total_calories = sum(
+                n.get("energy", {}).get("value", 0) / 1000  # Convert from milli-calories
+                for n in nutrition_records
+            )
+            lines.append(f"🍽️ {total_calories:.0f} cal")
         
         url = f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/sendMessage"
         async with httpx.AsyncClient() as client:
@@ -153,7 +138,7 @@ async def ingest_debug(
 
 @app.post("/v1/ingest/daily", response_model=IngestResponse)
 async def ingest_daily(
-    payload: DailyIngestRequest,
+    payload: RawHealthConnectIngest,
     db: AsyncSession = Depends(get_db),
     _: str = Depends(verify_api_key),
 ):
@@ -163,20 +148,21 @@ async def ingest_daily(
     """
     logger.info(f"Daily ingest: {payload.date} from {payload.source.device_id}")
     
-    payload = _validate_payload(payload)
-    raw_payload = json.dumps(payload.model_dump(mode="json"))
+    payload = _validate_raw_payload(payload)
     
-    # Simple insert for now
+    # Simple insert for now (v3 schema)
     await db.execute(
         text("""
-            INSERT INTO health_connect_daily (id, device_id, date, collected_at, raw_data)
-            VALUES (gen_random_uuid(), :device_id, :date, :collected_at, :raw_data)
+            INSERT INTO health_connect_daily (id, device_id, date, collected_at, schema_version, source_app, raw_json)
+            VALUES (gen_random_uuid(), :device_id, :date, :collected_at, :schema_version, :source_app, :raw_json)
         """),
         {
             "device_id": payload.source.device_id,
             "date": payload.date,
             "collected_at": payload.source.collected_at,
-            "raw_data": raw_payload,
+            "schema_version": str(payload.schema_version),
+            "source_app": payload.source.source_app,
+            "raw_json": payload.raw_json,
         }
     )
     await db.commit()
@@ -189,7 +175,7 @@ async def ingest_daily(
 
 @app.post("/v1/ingest/intraday", response_model=IngestResponse)
 async def ingest_intraday(
-    payload: DailyIngestRequest,
+    payload: RawHealthConnectIngest,
     db: AsyncSession = Depends(get_db),
     _: str = Depends(verify_api_key),
 ):
@@ -200,23 +186,24 @@ async def ingest_intraday(
     """
     logger.info(f"Intraday ingest: {payload.date} from {payload.source.device_id}")
     
-    payload = _validate_payload(payload)
-    raw_payload = json.dumps(payload.model_dump(mode="json"))
+    payload = _validate_raw_payload(payload)
     
-    # Pure append — no conflict resolution, no constraints needed
+    # Pure append — no conflict resolution, no constraints needed (v3 schema)
     result = await db.execute(
         text("""
             INSERT INTO health_connect_intraday_logs
-                (id, device_id, date, collected_at, raw_data)
+                (id, device_id, date, collected_at, schema_version, source_app, raw_json)
             VALUES
-                (gen_random_uuid(), :device_id, :date, :collected_at, :raw_data)
+                (gen_random_uuid(), :device_id, :date, :collected_at, :schema_version, :source_app, :raw_json)
             RETURNING id
         """),
         {
             "device_id": payload.source.device_id,
             "date": payload.date,
             "collected_at": payload.source.collected_at,
-            "raw_data": raw_payload,
+            "schema_version": str(payload.schema_version),
+            "source_app": payload.source.source_app,
+            "raw_json": payload.raw_json,
         }
     )
     await db.commit()
@@ -251,7 +238,7 @@ async def get_latest_record(
     """
     result = await db.execute(
         text("""
-            SELECT device_id, date, collected_at, received_at, raw_data
+            SELECT device_id, date, collected_at, received_at, schema_version, source_app, raw_json
             FROM health_connect_daily
             ORDER BY date DESC, collected_at DESC
             LIMIT 1
@@ -267,7 +254,9 @@ async def get_latest_record(
         "date": row["date"].isoformat(),
         "collected_at": row["collected_at"].isoformat(),
         "received_at": row["received_at"].isoformat(),
-        "data": row["raw_data"],
+        "schema_version": row["schema_version"],
+        "source_app": row["source_app"],
+        "data": json.loads(row["raw_json"]),
     }
 
 
@@ -280,7 +269,7 @@ async def get_record_by_date(
     """Get canonical daily record for specific date."""
     result = await db.execute(
         text("""
-            SELECT device_id, date, collected_at, received_at, raw_data
+            SELECT device_id, date, collected_at, received_at, schema_version, source_app, raw_json
             FROM health_connect_daily
             WHERE date = :date
             LIMIT 1
@@ -297,7 +286,9 @@ async def get_record_by_date(
         "date": row["date"].isoformat(),
         "collected_at": row["collected_at"].isoformat(),
         "received_at": row["received_at"].isoformat(),
-        "data": row["raw_data"],
+        "schema_version": row["schema_version"],
+        "source_app": row["source_app"],
+        "data": json.loads(row["raw_json"]),
     }
 
 
@@ -311,7 +302,7 @@ async def list_records(
     """List canonical daily records within date range."""
     result = await db.execute(
         text("""
-            SELECT device_id, date, collected_at, received_at, raw_data
+            SELECT device_id, date, collected_at, received_at, schema_version, source_app, raw_json
             FROM health_connect_daily
             WHERE date >= :start_date AND date <= :end_date
             ORDER BY date ASC
@@ -328,7 +319,9 @@ async def list_records(
                 "date": r["date"].isoformat(),
                 "collected_at": r["collected_at"].isoformat(),
                 "received_at": r["received_at"].isoformat(),
-                "data": r["raw_data"],
+                "schema_version": r["schema_version"],
+                "source_app": r["source_app"],
+                "data": json.loads(r["raw_json"]),
             }
             for r in rows
         ],
@@ -363,7 +356,7 @@ async def get_intraday_logs(
     
     result = await db.execute(
         text(f"""
-            SELECT id, device_id, date, collected_at, received_at, raw_data
+            SELECT id, device_id, date, collected_at, received_at, schema_version, source_app, raw_json
             FROM health_connect_intraday_logs
             {where_clause}
             ORDER BY collected_at DESC
@@ -382,7 +375,9 @@ async def get_intraday_logs(
                 "date": r["date"].isoformat(),
                 "collected_at": r["collected_at"].isoformat(),
                 "received_at": r["received_at"].isoformat(),
-                "data": r["raw_data"],
+                "schema_version": r["schema_version"],
+                "source_app": r["source_app"],
+                "data": json.loads(r["raw_json"]),
             }
             for r in rows
         ],
