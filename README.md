@@ -1,154 +1,160 @@
 # SH-APK-API
 
-**Health Data Ingestion & Query API**
+**Health Connect Ingestion API (v3)**
 
-A production-ready FastAPI service that ingests, stores, and serves health metrics from Android devices. Built for real-time sync with Telegram notifications and historical trend analysis.
+A minimal, robust FastAPI service that receives raw Health Connect JSON from Android devices, stores it in PostgreSQL, and exposes query endpoints for downstream analysis.
+
+Built for personal health data pipelines — own your data, query it freely.
 
 ---
 
-## Tech Stack
+## What It Does
 
-| Layer | Technology |
-|-------|------------|
-| **API** | FastAPI (Python 3.12) |
-| **Database** | PostgreSQL 16 + asyncpg |
-| **ORM** | SQLAlchemy 2.0 (async) |
-| **Migrations** | Alembic |
-| **Notifications** | Telegram Bot API |
-| **Deployment** | Railway (Docker) |
-| **Validation** | Pydantic v2 |
+1. **Ingests** raw Health Connect JSON from your Android device (via custom bridge app)
+2. **Stores** it in PostgreSQL with full fidelity — no data loss, no forced schema
+3. **Notifies** via Telegram on every sync (optional)
+4. **Serves** query endpoints for building dashboards, analysis, or agentic systems
+
+---
+
+## API Endpoints
+
+### Ingestion (POST)
+
+```http
+POST /v1/ingest/daily
+POST /v1/ingest/intraday
+X-API-Key: <your-key>
+Content-Type: application/json
+
+{
+  "date": "2026-02-26",
+  "source": {
+    "device_id": "uuid",
+    "collected_at": "2026-02-26T23:30:00Z",
+    "source_app": "health_connect",
+    "schema_version": 3
+  },
+  "raw_json": "{...full Health Connect JSON...}"
+}
+```
+
+- **`/daily`** — Canonical daily record (one per day, multiple syncs create history)
+- **`/intraday`** — Audit log of every sync (append-only, for time-series analysis)
+- **`/debug`** — Logs full payload for development
+
+### Query (GET)
+
+```http
+GET /health                              → Database health check
+GET /v1/records/latest                   → Most recent daily record
+GET /v1/records/2026-02-26               → Specific date
+GET /v1/records?start_date=...&end_date=...  → Date range
+GET /v1/dates                            → All available dates with metadata
+GET /v1/logs?date=2026-02-26&limit=10    → Intraday audit logs
+```
+
+All endpoints require `X-API-Key` header.
+
+---
+
+## Data Storage
+
+### Tables
+
+**`health_connect_daily`** — Canonical records (one row per unique date)
+- `date`, `device_id`, `raw_json` (JSONB), `received_at`, `schema_version`
+- Multiple syncs per day = multiple rows (full history preserved)
+
+**`health_connect_intraday_logs`** — Audit trail
+- Every sync creates a row
+- For debugging sync issues, building time-series visualizations
+
+### Raw JSON Structure
+
+The `raw_json` field contains full Health Connect data:
+
+```json
+{
+  "StepsRecord": [...],
+  "WeightRecord": [...],
+  "HeartRateRecord": [...],
+  "ExerciseSessionRecord": [...],
+  "SleepSessionRecord": [...],
+  "NutritionRecord": [...],
+  "DistanceRecord": [...],
+  "BodyFatRecord": [...],
+  ...
+}
+```
+
+Query endpoints return this parsed back into JSON under the `data` key.
 
 ---
 
 ## Architecture
 
 ```
-Android Device (Health Connect)
-    ↓
-Custom APK → POST /health/connect/daily
-    ↓
-FastAPI (Validation + Auth)
-    ↓
-PostgreSQL (Dual Storage Strategy)
-    ├── health_connect_daily (upsert, current state)
-    └── health_connect_intraday_logs (append-only, time series)
-    ↓
-Telegram Bot (Sync Notifications)
+Android Device
+  └── Health Connect (Samsung Health, Google Fit, etc.)
+        └── Custom Bridge App
+              └── POST /v1/ingest/daily
+                    └── FastAPI
+                          ├── PostgreSQL (raw storage)
+                          └── Telegram (sync notification)
 ```
 
-### Storage Strategy
+### Key Design Decisions
 
-**Daily Table (`health_connect_daily`)**
-- One row per device per day
-- Upsert semantics: always the latest sync
-- Fast queries for current state
-
-**Intraday Logs (`health_connect_intraday_logs`)**
-- Append-only: every sync creates a row
-- Time-series data for trend analysis
-- JSONB payload for schema flexibility
-
----
-
-## API Endpoints
-
-### Health & Status
-
-```http
-GET /health          → Database connectivity check
-GET /debug/status    → Sync statistics and queue status
-```
-
-### Data Ingestion
-
-```http
-POST /health/connect/daily
-Content-Type: application/json
-X-API-Key: <secret>
-
-{
-  "date": "2026-02-21",
-  "device_id": "uuid",
-  "steps_total": 8543,
-  "body_metrics": {
-    "weight_kg": 78.5,
-    "body_fat_percentage": 15.2
-  },
-  "exercise_sessions": [...],
-  "nutrition_summary": {...}
-}
-```
-
-### Data Retrieval
-
-```http
-GET /health/connect/latest           → Current day summary
-GET /health/connect/{uuid}           → Specific record by ID
-GET /kernel/signals                  → Signal catalog + semantics
-GET /kernel/data/latest              → Latest intraday sync
-GET /kernel/data/history?signal=X    → Historical signal data
-GET /kernel/goals/progress           → Goal tracking with status
-```
-
----
-
-## Key Features
-
-- **Async Everything**: FastAPI + asyncpg for high concurrency
-- **Schema Evolution**: JSONB payloads with versioned migrations
-- **Real-time Notifications**: Telegram bot pings on every sync
-- **Goal Tracking**: P1/P2/P3 tiered goal system with progress calculation
-- **Signal Semantics**: Standardized health metric definitions (steps, nutrition, sleep)
-
----
-
-## Local Development
-
-```bash
-# Clone
-git clone https://github.com/Skragus/SH-APK-API.git
-cd SH-APK-API
-
-# Setup Python
-python -m venv venv
-source venv/bin/activate  # or venv\Scripts\activate on Windows
-pip install -r requirements.txt
-
-# Environment
-cp .env.example .env
-# Edit .env with your DATABASE_URL, API_KEY, TELEGRAM tokens
-
-# Database migrations
-alembic upgrade head
-
-# Run
-uvicorn app.main:app --reload
-```
+- **Raw storage** — No forced schema. Health Connect v4, v5, whatever — we handle it.
+- **Source-aware** — Knows Samsung Health vs Google Fit, prioritizes前者 for step counts
+- **Hash deduplication** — Bridge app skips unchanged data to save battery/bandwidth
+- **Double storage** — Daily table for current state, intraday logs for audit trail
 
 ---
 
 ## Deployment
 
-Deployed on Railway with auto-deploy from `main` branch:
+Hosted on Railway. Deploy via CLI:
 
-```yaml
-# railway.yml (implicit)
-build:
-  dockerfile: Dockerfile
-deploy:
-  healthcheck:
-    path: /health
-    port: 8000
+```bash
+railway up --service SH-APK-API
+```
+
+Environment variables:
+```
+DATABASE_URL=postgresql+asyncpg://...
+API_KEY=your-secret-key
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
 ```
 
 ---
 
-## Database Schema
+## Client (Android)
 
-See [`DATABASE_README.md`](./DATABASE_README.md) for full schema documentation and query patterns.
+See the companion Android app in `../health-connect-bridge/` (separate repo).
+
+Features:
+- Polls Health Connect API every hour
+- Hash-based deduplication (skips unchanged data)
+- Background sync with battery optimization
+- Local hash cache for backfill support
+
+---
+
+## Future: ContextKernel Integration
+
+This API feeds into a broader personal context system:
+
+- **Ingest** → sh-apk-api (this service)
+- **Synthesize** → ContextKernel (aggregation, goal tracking, card generation)
+- **Consume** → Dashboards, agents, insights
+
+Raw endpoints here enable any downstream analysis without lock-in.
 
 ---
 
 ## License
 
-MIT
+MIT — Personal use. Data stays yours.
