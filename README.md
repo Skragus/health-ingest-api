@@ -1,4 +1,4 @@
-# SH-APK-API
+# health-ingest-api
 
 **Health Connect Ingestion API (v3)**
 
@@ -147,7 +147,7 @@ Features:
 
 This API feeds into a broader personal context system:
 
-- **Ingest** → sh-apk-api (this service)
+- **Ingest** → health-ingest-api (this service)
 - **Synthesize** → ContextKernel (aggregation, goal tracking, card generation)
 - **Consume** → Dashboards, agents, insights
 
