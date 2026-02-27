@@ -118,7 +118,7 @@ Android Device
 Hosted on Railway. Deploy via CLI:
 
 ```bash
-railway up --service SH-APK-API
+railway up --service health-ingest-api
 ```
 
 Environment variables:
