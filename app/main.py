@@ -274,7 +274,7 @@ async def get_record_by_date(
             WHERE date = :date
             LIMIT 1
         """),
-        {"date": date},
+        {"date": datetime.strptime(date, "%Y-%m-%d").date()},
     )
     row = result.mappings().first()
     
@@ -307,7 +307,7 @@ async def list_records(
             WHERE date >= :start_date AND date <= :end_date
             ORDER BY date ASC
         """),
-        {"start_date": start_date, "end_date": end_date},
+        {"start_date": datetime.strptime(start_date, "%Y-%m-%d").date(), "end_date": datetime.strptime(end_date, "%Y-%m-%d").date()},
     )
     rows = result.mappings().all()
     
