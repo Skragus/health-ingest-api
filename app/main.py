@@ -256,7 +256,7 @@ async def get_latest_record(
         "received_at": row["received_at"].isoformat(),
         "schema_version": row["schema_version"],
         "source_app": row["source_app"],
-        "data": json.loads(row["raw_json"]),
+        "data": row["raw_json"] if isinstance(row["raw_json"], dict) else json.loads(row["raw_json"]),
     }
 
 
@@ -288,7 +288,7 @@ async def get_record_by_date(
         "received_at": row["received_at"].isoformat(),
         "schema_version": row["schema_version"],
         "source_app": row["source_app"],
-        "data": json.loads(row["raw_json"]),
+        "data": row["raw_json"] if isinstance(row["raw_json"], dict) else json.loads(row["raw_json"]),
     }
 
 
@@ -321,7 +321,7 @@ async def list_records(
                 "received_at": r["received_at"].isoformat(),
                 "schema_version": r["schema_version"],
                 "source_app": r["source_app"],
-                "data": json.loads(r["raw_json"]),
+                "data": r["raw_json"] if isinstance(r["raw_json"], dict) else json.loads(r["raw_json"]),
             }
             for r in rows
         ],
@@ -377,7 +377,7 @@ async def get_intraday_logs(
                 "received_at": r["received_at"].isoformat(),
                 "schema_version": r["schema_version"],
                 "source_app": r["source_app"],
-                "data": json.loads(r["raw_json"]),
+                "data": r["raw_json"] if isinstance(r["raw_json"], dict) else json.loads(r["raw_json"]),
             }
             for r in rows
         ],
