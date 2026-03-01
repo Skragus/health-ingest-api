@@ -78,6 +78,62 @@ def _validate_raw_payload(
 
 
 # ---------------------------------------------------------------------------
+# Data Processing / Deduplication
+# ---------------------------------------------------------------------------
+
+SOURCE_PRIORITY = {
+    "com.sec.android.app.shealth": 1,
+    "com.google.android.apps.fitness": 2,
+    "com.health.openscale.sync.oss": 3,
+}
+
+def _get_source_priority(package_name: str) -> int:
+    return SOURCE_PRIORITY.get(package_name, 99)
+
+def _deduplicate_steps(steps_records: list) -> list:
+    if not steps_records:
+        return []
+    by_time = {}
+    for record in steps_records:
+        start = record.get("startTime")
+        end = record.get("endTime")
+        if not start or not end:
+            continue
+        key = f"{start}_{end}"
+        pkg = record.get("metadata", {}).get("dataOrigin", {}).get("packageName", "unknown")
+        priority = _get_source_priority(pkg)
+        if key not in by_time:
+            by_time[key] = record
+        else:
+            existing_pkg = by_time[key].get("metadata", {}).get("dataOrigin", {}).get("packageName", "unknown")
+            existing_priority = _get_source_priority(existing_pkg)
+            if priority < existing_priority:
+                by_time[key] = record
+    return list(by_time.values())
+
+def _calculate_deduped_metrics(raw_data: dict) -> dict:
+    steps_records = raw_data.get("StepsRecord", [])
+    raw_steps = sum(s.get("count", 0) for s in steps_records)
+    deduped_records = _deduplicate_steps(steps_records)
+    deduped_steps = sum(s.get("count", 0) for s in deduped_records)
+    sources = {}
+    for record in steps_records:
+        pkg = record.get("metadata", {}).get("dataOrigin", {}).get("packageName", "unknown")
+        if pkg not in sources:
+            sources[pkg] = {"raw": 0, "deduped": 0, "count": 0}
+        sources[pkg]["raw"] += record.get("count", 0)
+        sources[pkg]["count"] += 1
+    for record in deduped_records:
+        pkg = record.get("metadata", {}).get("dataOrigin", {}).get("packageName", "unknown")
+        if pkg in sources:
+            sources[pkg]["deduped"] += record.get("count", 0)
+    return {
+        "steps": {"raw": raw_steps, "deduped": deduped_steps},
+        "sources": sources,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Notifications
 # ---------------------------------------------------------------------------
 
@@ -90,10 +146,14 @@ async def _send_notification(sync_type: str, payload: RawHealthConnectIngest):
         lines = [f"✅ {sync_type.title()} Sync (v3)", f"📅 {payload.date}"]
         
         # Extract step count from StepsRecord if available
-        steps_records = raw_data.get("StepsRecord", [])
-        if steps_records:
-            total_steps = sum(s.get("count", 0) for s in steps_records)
-            lines.append(f"🚶 {total_steps:,} steps")
+        metrics = _calculate_deduped_metrics(raw_data)
+        steps_info = metrics["steps"]
+        if steps_info["deduped"] > 0:
+            if steps_info["raw"] != steps_info["deduped"]:
+                lines.append(f"🚶 {steps_info['deduped']:,} steps (raw: {steps_info['raw']:,})")
+            else:
+                lines.append(f"🚶 {steps_info['deduped']:,} steps")
+            logger.info(f"Steps breakdown: {metrics['sources']}")
         
         # Count exercise sessions
         exercise_records = raw_data.get("ExerciseSessionRecord", [])
