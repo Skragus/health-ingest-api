@@ -91,44 +91,79 @@ def _get_source_priority(package_name: str) -> int:
     return SOURCE_PRIORITY.get(package_name, 99)
 
 def _deduplicate_steps(steps_records: list) -> list:
+    """
+    Deduplicate by keeping only the latest (most recent endTime) record 
+    from each source. This handles cumulative step counting where each
+    sync contains updated totals for overlapping time periods.
+    """
     if not steps_records:
         return []
-    by_time = {}
+    
+    # Group by source
+    by_source = {}
     for record in steps_records:
-        start = record.get("startTime")
-        end = record.get("endTime")
-        if not start or not end:
-            continue
-        key = f"{start}_{end}"
         pkg = record.get("metadata", {}).get("dataOrigin", {}).get("packageName", "unknown")
-        priority = _get_source_priority(pkg)
-        if key not in by_time:
-            by_time[key] = record
+        end_time = record.get("endTime", "")
+        
+        if pkg not in by_source:
+            by_source[pkg] = record
         else:
-            existing_pkg = by_time[key].get("metadata", {}).get("dataOrigin", {}).get("packageName", "unknown")
-            existing_priority = _get_source_priority(existing_pkg)
-            if priority < existing_priority:
-                by_time[key] = record
-    return list(by_time.values())
+            # Keep the record with the latest endTime
+            if end_time > by_source[pkg].get("endTime", ""):
+                by_source[pkg] = record
+    
+    return list(by_source.values())
 
 def _calculate_deduped_metrics(raw_data: dict) -> dict:
+    """
+    Calculate step count using only the highest priority source.
+    Avoids double-counting when multiple apps track the same activity.
+    """
     steps_records = raw_data.get("StepsRecord", [])
+    
+    # Raw count (sum everything - for reference only)
     raw_steps = sum(s.get("count", 0) for s in steps_records)
-    deduped_records = _deduplicate_steps(steps_records)
-    deduped_steps = sum(s.get("count", 0) for s in deduped_records)
-    sources = {}
+    
+    # Group records by source
+    by_source = {}
     for record in steps_records:
         pkg = record.get("metadata", {}).get("dataOrigin", {}).get("packageName", "unknown")
-        if pkg not in sources:
-            sources[pkg] = {"raw": 0, "deduped": 0, "count": 0}
-        sources[pkg]["raw"] += record.get("count", 0)
-        sources[pkg]["count"] += 1
-    for record in deduped_records:
-        pkg = record.get("metadata", {}).get("dataOrigin", {}).get("packageName", "unknown")
-        if pkg in sources:
-            sources[pkg]["deduped"] += record.get("count", 0)
+        if pkg not in by_source:
+            by_source[pkg] = []
+        by_source[pkg].append(record)
+    
+    # Calculate total for each source (latest timestamp wins per source)
+    source_totals = {}
+    for pkg, records in by_source.items():
+        # Get the record with latest endTime
+        latest_record = max(records, key=lambda r: r.get("endTime", ""))
+        # Sum all counts from that source up to that point
+        total = sum(r.get("count", 0) for r in records if r.get("endTime", "") <= latest_record.get("endTime", ""))
+        source_totals[pkg] = total
+    
+    # Pick the highest priority source that has data
+    best_source = None
+    best_priority = 999
+    best_steps = 0
+    
+    for pkg, total in source_totals.items():
+        priority = _get_source_priority(pkg)
+        if priority < best_priority:
+            best_priority = priority
+            best_source = pkg
+            best_steps = total
+    
+    # Build source info for logging
+    sources = {}
+    for pkg, records in by_source.items():
+        sources[pkg] = {
+            "priority": _get_source_priority(pkg),
+            "count": len(records),
+            "total": source_totals[pkg]
+        }
+    
     return {
-        "steps": {"raw": raw_steps, "deduped": deduped_steps},
+        "steps": {"raw": raw_steps, "deduped": best_steps, "source": best_source},
         "sources": sources,
     }
 
