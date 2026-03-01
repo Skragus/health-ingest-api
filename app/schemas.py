@@ -1,7 +1,7 @@
 """Pydantic schemas — request/response models."""
 
 from datetime import date, datetime, timezone
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
@@ -106,7 +106,16 @@ class RawHealthConnectIngest(BaseModel):
     date: date
     raw_json: str  # JSON string containing full Health Connect export
     source: SourceHealthConnect
-    
+    record_type: Optional[Literal["daily", "intraday"]] = Field(
+        default=None,
+        description="Set by server from endpoint if omitted; client may send to make payload self-describing",
+    )
+    id: Optional[UUID] = Field(default=None, description="Optional client id for idempotency; server generates if omitted")
+    payload_hash: Optional[str] = Field(
+        default=None,
+        description="Optional sha256 (hex) of canonicalized raw_json; server computes and stores if omitted",
+    )
+
     model_config = {"extra": "allow"}
 
     @field_validator("date")

@@ -1,8 +1,10 @@
 """SH-APK-API — Health Connect Ingestion Layer (Simplified v2)"""
 
+import hashlib
 import json
 import logging
 import asyncio
+import uuid
 import httpx
 from datetime import date as py_date, datetime
 
@@ -38,7 +40,17 @@ async def verify_api_key(x_api_key: str = Header(...)):
 # Validation
 # ---------------------------------------------------------------------------
 
-def _validate_raw_payload(payload: RawHealthConnectIngest) -> RawHealthConnectIngest:
+def _canonical_payload_hash(raw_json: str) -> str:
+    """SHA256 (hex) of canonicalized JSON for dedup/integrity."""
+    parsed = json.loads(raw_json)
+    canonical = json.dumps(parsed, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _validate_raw_payload(
+    payload: RawHealthConnectIngest,
+    record_type: str,
+) -> RawHealthConnectIngest:
     """Minimal validation for raw Health Connect payloads."""
     # Parse raw_json to check it's valid JSON
     try:
@@ -56,6 +68,12 @@ def _validate_raw_payload(payload: RawHealthConnectIngest) -> RawHealthConnectIn
             detail="Payload exceeds 50MB limit"
         )
     
+    # Ensure record_type matches endpoint
+    if payload.record_type is not None and payload.record_type != record_type:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"record_type must be {record_type!r} for this endpoint",
+        )
     return payload
 
 
@@ -147,30 +165,36 @@ async def ingest_daily(
     Temporarily simplified: always inserts. Upsert logic to be restored.
     """
     logger.info(f"Daily ingest: {payload.date} from {payload.source.device_id}")
-    
-    payload = _validate_raw_payload(payload)
-    
-    # Simple insert for now (v3 schema)
+    payload = _validate_raw_payload(payload, "daily")
+    if payload.record_type is None:
+        payload = payload.model_copy(update={"record_type": "daily"})
+    payload_hash = payload.payload_hash or _canonical_payload_hash(payload.raw_json)
+    row_id = payload.id or uuid.uuid4()
+
     await db.execute(
         text("""
-            INSERT INTO health_connect_daily (id, device_id, date, collected_at, schema_version, source_app, raw_json)
-            VALUES (gen_random_uuid(), :device_id, :date, :collected_at, :schema_version, :source_app, :raw_json)
+            INSERT INTO health_connect_daily
+                (id, device_id, date, collected_at, schema_version, source_app, raw_json, payload_hash, record_type)
+            VALUES
+                (:id, :device_id, :date, :collected_at, :schema_version, :source_app, :raw_json, :payload_hash, :record_type)
         """),
         {
+            "id": row_id,
             "device_id": payload.source.device_id,
             "date": payload.date,
             "collected_at": payload.source.collected_at,
             "schema_version": str(payload.schema_version),
             "source_app": payload.source.source_app,
             "raw_json": payload.raw_json,
+            "payload_hash": payload_hash,
+            "record_type": payload.record_type or "daily",
         }
     )
     await db.commit()
-    
+
     asyncio.create_task(_send_notification("daily", payload))
     logger.info(f"Inserted daily record for {payload.date}")
-    
-    return IngestResponse(inserted=True)
+    return IngestResponse(inserted=True, id=row_id)
 
 
 @app.post("/v1/ingest/intraday", response_model=IngestResponse)
@@ -185,33 +209,36 @@ async def ingest_intraday(
     Query with ORDER BY collected_at DESC LIMIT 1 for latest snapshot.
     """
     logger.info(f"Intraday ingest: {payload.date} from {payload.source.device_id}")
-    
-    payload = _validate_raw_payload(payload)
-    
-    # Pure append — no conflict resolution, no constraints needed (v3 schema)
+    payload = _validate_raw_payload(payload, "intraday")
+    if payload.record_type is None:
+        payload = payload.model_copy(update={"record_type": "intraday"})
+    payload_hash = payload.payload_hash or _canonical_payload_hash(payload.raw_json)
+    row_id = payload.id or uuid.uuid4()
+
     result = await db.execute(
         text("""
             INSERT INTO health_connect_intraday_logs
-                (id, device_id, date, collected_at, schema_version, source_app, raw_json)
+                (id, device_id, date, collected_at, schema_version, source_app, raw_json, payload_hash, record_type)
             VALUES
-                (gen_random_uuid(), :device_id, :date, :collected_at, :schema_version, :source_app, :raw_json)
+                (:id, :device_id, :date, :collected_at, :schema_version, :source_app, :raw_json, :payload_hash, :record_type)
             RETURNING id
         """),
         {
+            "id": row_id,
             "device_id": payload.source.device_id,
             "date": payload.date,
             "collected_at": payload.source.collected_at,
             "schema_version": str(payload.schema_version),
             "source_app": payload.source.source_app,
             "raw_json": payload.raw_json,
+            "payload_hash": payload_hash,
+            "record_type": payload.record_type or "intraday",
         }
     )
     await db.commit()
-    
     inserted_id = result.scalar()
-    
+
     asyncio.create_task(_send_notification("intraday", payload))
-    
     return IngestResponse(inserted=True, id=inserted_id)
 
 

@@ -23,6 +23,8 @@ class HealthConnectDaily(Base):
     schema_version = Column(String, nullable=False, default="3")
     source_app = Column(String, nullable=False, default="health_connect")
     raw_json = Column(JSONB, nullable=False)
+    payload_hash = Column(String(64), nullable=True)
+    record_type = Column(String(), nullable=False, default="daily")
 
 
 class HealthConnectIntradayLog(Base):
@@ -40,3 +42,5 @@ class HealthConnectIntradayLog(Base):
     schema_version = Column(String, nullable=False, default="3")
     source_app = Column(String, nullable=False, default="health_connect")
     raw_json = Column(JSONB, nullable=False)
+    payload_hash = Column(String(64), nullable=True)
+    record_type = Column(String(), nullable=False, default="intraday")
